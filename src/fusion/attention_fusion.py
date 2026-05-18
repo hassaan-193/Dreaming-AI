@@ -24,7 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from config import (FUSION_HEADS, FUSION_DIM, PRICE_FEAT_DIM,
-                    SENTIMENT_FEAT_DIM, N_FEATURES)
+                    SENTIMENT_FEAT_DIM, N_FEATURES,
+                    LATENT_DIM, FORECAST_HORIZONS, TIMEFRAMES)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,7 +184,6 @@ class DreamingAIv3(nn.Module):
                  forecast_horizons: list = None):
         super().__init__()
         if forecast_horizons is None:
-            from config import FORECAST_HORIZONS
             forecast_horizons = FORECAST_HORIZONS
 
         self.forecast_horizons = forecast_horizons
@@ -194,10 +194,7 @@ class DreamingAIv3(nn.Module):
 
         # ── v2 components (unchanged) — now receive fused_dim input instead of n_features
         # Re-import here to avoid circular deps
-        import sys, os
-        sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
         from src.models.debm import LSTMEncoder, EnergyFunction, PredictionHead
-        from config import LATENT_DIM
 
         self.encoder   = LSTMEncoder(n_features=fusion_dim, latent_dim=latent_dim)
         self.energy_fn = EnergyFunction(latent_dim=latent_dim)
@@ -214,9 +211,7 @@ class DreamingAIv3(nn.Module):
         })
 
         # ── v3 addition: timeframe embedding ──────────────────────────────────
-        from config import TIMEFRAMES
-        n_tfs = len(TIMEFRAMES)
-        self.timeframe_embed  = nn.Embedding(n_tfs, latent_dim)
+        self.timeframe_embed  = nn.Embedding(len(TIMEFRAMES), latent_dim)
         self.tf_names         = list(TIMEFRAMES.keys())
 
     def _tf_idx(self, timeframe: str) -> int:
