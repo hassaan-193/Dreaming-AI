@@ -253,7 +253,31 @@ def run_pipeline_v2(
         ticker=ticker, histories=histories, device=device,
     )
 
-    # IMPROVEMENT 10: Walk-forward validation
+    # ── Step 6b — Gradient Boosting Ensemble ──────────────────────────────────
+    print("\n[v2] Step 6b — Training Gradient Boosting Ensemble …")
+    try:
+        from src.models.ensemble import train_boosting_ensemble
+        boost_results = train_boosting_ensemble(
+            debm_model=debm_model,
+            X_train=X_train, y_train=y_train,
+            X_val=X_val,   y_val=y_val,
+            ticker=ticker,
+            n_features=n_feat,
+            epochs=40,
+            device=device,
+        )
+        results["BoostedEnsemble"] = {
+            "DirectionalAcc": boost_results["val_dir_acc_boosted"],
+            "RMSE": results.get("DEBM", {}).get("RMSE", 0),
+            "MAE":  results.get("DEBM", {}).get("MAE",  0),
+            "MAPE": results.get("DEBM", {}).get("MAPE", 0),
+        }
+        print(f"[v2] Boosted Ensemble Val Dir.Acc: {boost_results['val_dir_acc_boosted']:.1f}%  "
+              f"(vs DEBM alone: {boost_results['val_dir_acc_debm']:.1f}%)")
+    except Exception as e:
+        print(f"[v2] Boosting ensemble skipped ({e})")
+
+    # ── IMPROVEMENT 10: Walk-forward validation ────────────────────────────────
     # Provides an honest, rolling accuracy estimate for FYP defence.
     print("\n[v2] Step 7 — Walk-forward validation …")
     from src.models.debm import DreamingAI as _DreamingAI

@@ -280,123 +280,108 @@ def render_eval_tab():
 
 
 def render_predict_tab():
-    st.markdown("## 🔮 Run Prediction Pipeline")
+    st.markdown('## Prediction Pipeline')
 
     if not TORCH_OK:
-        st.error("PyTorch is not installed. Cannot run inference.")
+        st.error('PyTorch is not installed. Cannot run inference.')
         return
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        pred_ticker = st.selectbox("Ticker", TICKERS, key="pred_ticker")
+        pred_ticker = st.selectbox('Ticker', TICKERS, key='pred_ticker')
     with c2:
         pred_interval = st.selectbox(
-            "Time Interval", list(TIMEFRAMES.keys()), index=4, key="pred_interval"
+            'Time Interval', list(TIMEFRAMES.keys()), index=4, key='pred_interval'
         )
+    with c3:
+        model_mode = st.selectbox('Model Mode', ['Single Stock', 'Multi Stock'], key='pred_mode')
 
-    pred_btn = st.button("🔮 Get Prediction", type="primary", key="pred_btn")
+    pred_btn = st.button('Get Prediction', type='primary', key='pred_btn')
 
     if pred_btn:
-        debm_path = os.path.join(MODELS_DIR, f"{pred_ticker}_debm_best.pth")
-        scaler_path = os.path.join(MODELS_DIR, f"{pred_ticker}_scaler.pkl")
+        if model_mode == 'Multi Stock':
+            debm_path    = os.path.join(MODELS_DIR, 'multi_debm_best.pth')
+            boost_ticker = 'multi'
+        else:
+            debm_path    = os.path.join(MODELS_DIR, pred_ticker + '_debm_best.pth')
+            boost_ticker = pred_ticker
+
+        scaler_path = os.path.join(MODELS_DIR, pred_ticker + '_scaler.pkl')
 
         if not os.path.exists(debm_path):
-            st.error(f"No trained model found for **{pred_ticker}**. Please run training first.")
+            st.error('No model found. Run training first.')
             return
         if not os.path.exists(scaler_path):
-            st.error(f"Scaler not found for **{pred_ticker}**.")
+            st.error('Scaler not found for ' + pred_ticker)
             return
 
-        with st.spinner(f"Running inference for {pred_ticker} [{pred_interval}]…"):
+        with st.spinner('Running boosted inference...'):
             try:
                 import joblib
                 from src.data.fetcher import fetch_stock_data
                 from src.models.debm import DreamingAI
+                from src.models.ensemble import boosted_predict
 
                 scaler = joblib.load(scaler_path)
 
-                meta_path = os.path.join(MODELS_DIR, f"{pred_ticker}_meta.json")
+                meta_path = os.path.join(MODELS_DIR, pred_ticker + '_meta.json')
                 if os.path.exists(meta_path):
-                    with open(meta_path) as f:
-                        meta = json.load(f)
-                    n_feat = int(meta.get("n_features", len(FEATURE_COLS)))
-                    close_idx = int(meta.get("close_idx", 3))
+                    with open(meta_path) as _mf:
+                        _m = json.load(_mf)
+                    n_feat    = int(_m.get('n_features', len(FEATURE_COLS)))
+                    close_idx = int(_m.get('close_idx', 3))
                 else:
-                    n_feat = len(FEATURE_COLS)
+                    n_feat    = len(FEATURE_COLS)
                     close_idx = 3
 
-                debm = DreamingAI(n_features=n_feat)
+                if model_mode == 'Multi Stock':
+                    debm = DreamingAI(n_features=n_feat, num_stocks=len(TICKERS))
+                else:
+                    debm = DreamingAI(n_features=n_feat)
                 debm.load_state_dict(
-                    torch.load(debm_path, map_location="cpu", weights_only=True)
+                    torch.load(debm_path, map_location='cpu', weights_only=True)
                 )
                 debm.eval()
 
-                df = fetch_stock_data(pred_ticker, force_refresh=True)
-                avail = [c for c in FEATURE_COLS if c in df.columns]
-                scaled = scaler.transform(df[avail].values).astype("float32")
+                df     = fetch_stock_data(pred_ticker, force_refresh=True)
+                avail  = [c for c in FEATURE_COLS if c in df.columns]
+                scaled = scaler.transform(df[avail].values).astype('float32')
 
                 if len(scaled) < WINDOW_SIZE:
-                    st.error(f"Not enough data: need {WINDOW_SIZE} rows, got {len(scaled)}.")
+                    st.error('Not enough data: need ' + str(WINDOW_SIZE) + ' rows, got ' + str(len(scaled)))
                     return
 
                 x_input = torch.tensor(scaled[-WINDOW_SIZE:][np.newaxis])
-
-                with torch.no_grad():
-                    ps = debm.predict(x_input).cpu().numpy().flatten()[0]
+                ps = boosted_predict(debm, x_input, ticker=boost_ticker, device='cpu')
 
                 def inv_transform(v):
-                    d = np.zeros((1, n_feat), dtype="float32")
+                    d = np.zeros((1, n_feat), dtype='float32')
                     d[0, close_idx] = v
                     return float(scaler.inverse_transform(d)[0, close_idx])
 
                 pred_usd = inv_transform(ps)
-                last_usd = float(df["Close"].iloc[-1])
-                trend = "UP" if pred_usd > last_usd else "DOWN"
-                arrow = "↑" if trend == "UP" else "↓"
-                color_cls = "delta-up" if trend == "UP" else "delta-down"
-                pct_chg = (pred_usd - last_usd) / last_usd * 100
+                last_usd = float(df['Close'].iloc[-1])
+                pct_chg  = (pred_usd - last_usd) / last_usd * 100
+                sign     = '+' if pred_usd > last_usd else ''
 
-                st.markdown(f"""
-                <div class="metric-card" style="max-width:450px;">
-                  <div class="label">Predicted Next Close ({pred_interval})</div>
-                  <div class="value">${pred_usd:.2f}</div>
-                  <div class="delta {color_cls}">
-                    {arrow} {abs(pct_chg):.2f}% vs ${last_usd:.2f} current
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
+                res_ckpt   = os.path.join(MODELS_DIR, boost_ticker + '_residual_lstm.pth')
+                meta_ckpt2 = os.path.join(MODELS_DIR, boost_ticker + '_meta_learner.pth')
+                is_boosted = os.path.exists(res_ckpt) and os.path.exists(meta_ckpt2)
+                badge = 'Boosted Ensemble (ResidualLSTM + MetaLearner)' if is_boosted else 'DEBM'
 
-                # LSTM ensemble if available
-                lstm_path = os.path.join(MODELS_DIR, f"{pred_ticker}_lstm_best.pth")
-                if os.path.exists(lstm_path):
-                    try:
-                        from src.models.baselines import LSTMModel
-                        lstm = LSTMModel(n_features=n_feat)
-                        lstm.load_state_dict(
-                            torch.load(lstm_path, map_location="cpu", weights_only=True)
-                        )
-                        lstm.eval()
-                        with torch.no_grad():
-                            ls = lstm(x_input).cpu().numpy().flatten()[0]
-                        ensemble_scaled = ps * 0.65 + ls * 0.35
-                        ensemble_usd = inv_transform(ensemble_scaled)
-                        e_trend = "↑" if ensemble_usd > last_usd else "↓"
-                        e_cls = "delta-up" if ensemble_usd > last_usd else "delta-down"
-                        st.markdown(f"""
-                        <div class="metric-card" style="max-width:450px;">
-                          <div class="label">Ensemble (65% DEBM + 35% LSTM)</div>
-                          <div class="value">${ensemble_usd:.2f}</div>
-                          <div class="delta {e_cls}">{e_trend} Ensemble Prediction</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    except Exception:
-                        pass
+                st.metric(
+                    label=badge + ' -- ' + pred_ticker + ' Next Close (' + pred_interval + ')',
+                    value='$' + str(round(pred_usd, 2)),
+                    delta=sign + str(round(pct_chg, 2)) + '% vs $' + str(round(last_usd, 2))
+                )
+
+                if not is_boosted:
+                    st.info('Tip: Run the full training pipeline to enable Boosted Ensemble for higher accuracy.')
 
             except Exception as e:
-                st.error(f"Prediction failed: {e}")
+                st.error('Prediction failed: ' + str(e))
                 import traceback
                 st.code(traceback.format_exc())
-
 
 def render_live_feed_tab():
     st.markdown("## 📡 Subscribe Live Feed")
