@@ -207,19 +207,24 @@ PALETTE = {
 
 def compute_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict:
     """RMSE, MAE, and Directional Accuracy."""
-    rmse    = float(np.sqrt(mean_squared_error(actual, predicted)))
-    mae     = float(mean_absolute_error(actual, predicted))
+    p = predicted[:len(actual)]
+    rmse = float(np.sqrt(mean_squared_error(actual, p)))
+    mae  = float(mean_absolute_error(actual, p))
+
     if PREDICT_LOG_RETURN:
-        da = float(np.mean((actual > 0) == (predicted[:len(actual)] > 0)) * 100)
+        # In log-return mode: directional accuracy = did we get the sign right?
+        da   = float(np.mean((actual > 0) == (p > 0)) * 100)
+        # MAPE is meaningless on log returns (values near 0 blow up denominator)
+        # Use a scaled RMSE proxy instead
+        mape = float(rmse * 100)   # report as percentage of unit scale
     else:
-        da      = float(np.mean(
-            np.sign(np.diff(actual)) == np.sign(np.diff(predicted[:len(actual)]))
+        da   = float(np.mean(
+            np.sign(np.diff(actual)) == np.sign(np.diff(p))
         ) * 100)
-    # Mean Absolute Percentage Error
-    mape    = float(np.mean(np.abs((actual - predicted[:len(actual)]) /
-                                   (np.abs(actual) + 1e-9))) * 100)
-    return dict(RMSE=round(rmse,4), MAE=round(mae,4),
-                DirectionalAcc=round(da,2), MAPE=round(mape,4))
+        mape = float(np.mean(np.abs((actual - p) / (np.abs(actual) + 1e-9))) * 100)
+
+    return dict(RMSE=round(rmse, 4), MAE=round(mae, 4),
+                DirectionalAcc=round(da, 2), MAPE=round(mape, 4))
 
 
 def print_table(results: dict):
@@ -488,10 +493,16 @@ def plot_predictions(actual, preds: dict, ticker: str):
     _savefig(fig, f"{ticker}_predictions.png")
 
 
+# Keys in results that are NOT model entries (they hold nested crash/walk data)
+_NON_MODEL_KEYS = {"crash_analysis", "walk_forward", "conditions"}
+
+
 def plot_metrics_bar(results: dict, ticker: str):
     """Side-by-side bar chart for all metrics."""
     metrics = ["RMSE", "MAE", "MAPE"]
-    models  = list(results.keys())
+    # Filter out non-model keys (e.g. crash_analysis, walk_forward)
+    models  = [m for m in results.keys() if m not in _NON_MODEL_KEYS
+               and isinstance(results[m], dict) and "RMSE" in results[m]]
     x       = np.arange(len(metrics))
     width   = 0.25
 
@@ -522,7 +533,8 @@ def plot_metrics_bar(results: dict, ticker: str):
 
 def plot_directional_accuracy(results: dict, ticker: str):
     """Bar chart for Directional Accuracy (higher is better)."""
-    models = list(results.keys())
+    models = [m for m in results.keys() if m not in _NON_MODEL_KEYS
+              and isinstance(results[m], dict) and "DirectionalAcc" in results[m]]
     vals   = [results[m]["DirectionalAcc"] for m in models]
     colors = [PALETTE.get(m, "#AAAAAA") for m in models]
 

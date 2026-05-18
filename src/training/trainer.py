@@ -70,19 +70,7 @@ def _directional_loss(pred: torch.Tensor, target: torch.Tensor,
                        label_smoothing: float = LABEL_SMOOTHING) -> torch.Tensor:
     """
     Weighted Binary Cross-Entropy on direction with label smoothing (v7).
-
-    Improvements:
-    - Rare large moves (crashes/spikes) get higher weight so the model
-      focuses on getting extreme days correct.
-    - Label smoothing (ε) reduces overconfidence: targets shifted from
-      {0,1} -> {ε/2, 1-ε/2} before BCE computation.
-    - Works in both price and log-return modes.
-
-    Args:
-        pred:           (B, 1) predicted values (scaled)
-        target:         (B, 1) actual values (scaled)
-        prev_close:     (B,)   last Close in the input window (scaled index 3)
-        label_smoothing: float, ε ∈ [0, 1)
+    Fixed: logit scale reduced from 200 -> 50 to prevent BCE saturation.
     """
     p = pred.squeeze(1)
     t = target.squeeze(1)
@@ -91,22 +79,19 @@ def _directional_loss(pred: torch.Tensor, target: torch.Tensor,
         pred_dir   = (p > 0).float()
         target_dir = (t > 0).float()
         move_size  = t.abs()
+        # Scale logit by a moderate factor — avoids saturated sigmoid
+        logit = p * 50.0
     else:
         pred_dir   = (p > prev_close).float()
         target_dir = (t > prev_close).float()
         move_size  = (t - prev_close).abs()
+        logit = (p - prev_close) * 50.0
 
     # Per-sample magnitude weight (larger moves -> higher weight)
     weights = 1.0 + move_size / (move_size.mean() + 1e-8)
     weights = weights.detach()
 
-    # Logit scaled to usable range for typical daily stock returns (~0.01)
-    if PREDICT_LOG_RETURN:
-        logit = p * 200.0
-    else:
-        logit = (p - prev_close) * 200.0
-
-    # OBJECTIVE 5: Label smoothing — shift targets away from hard 0/1
+    # Label smoothing
     if label_smoothing > 0.0:
         eps = label_smoothing
         target_dir_smooth = target_dir * (1.0 - eps) + 0.5 * eps
