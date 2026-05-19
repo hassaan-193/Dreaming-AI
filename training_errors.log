@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/workspace/Dreaming-AI/pipeline.py", line 601, in run_pipeline_multi
+    model, hist = train_debm(
+                  ^^^^^^^^^^^
+  File "/workspace/Dreaming-AI/src/training/trainer.py", line 357, in train_debm
+    scaler.unscale_(opt)
+  File "/venv/main/lib/python3.12/site-packages/torch/amp/grad_scaler.py", line 342, in unscale_
+    raise RuntimeError(
+RuntimeError: unscale_() has already been called on this optimizer since the last update().
