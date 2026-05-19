@@ -128,7 +128,7 @@ def render_deploy_tab():
             st.markdown(f"**{k}:** `{masked}`")
 
         st.markdown("---")
-        if st.button("🗑️ Purge Data Cache", use_container_width=True):
+        if st.button("🗑️ Purge Data Cache", width="stretch"):
             import glob
             removed = 0
             for f in glob.glob(os.path.join(MODELS_DIR, "..", "data", "*.csv")):
@@ -139,7 +139,7 @@ def render_deploy_tab():
                     pass
             st.success(f"Purged {removed} cached data file(s).")
 
-        if st.button("📋 Show Saved Models", use_container_width=True):
+        if st.button("📋 Show Saved Models", width="stretch"):
             models = [f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")] if os.path.exists(MODELS_DIR) else []
             if models:
                 st.write("\n".join(f"• `{m}`" for m in sorted(models)))
@@ -161,7 +161,7 @@ def render_train_tab():
         use_sentiment = st.toggle("Sentiment Analysis", value=True)
         dry_run = st.toggle("Dry Run (1 epoch, fast test)", value=False)
         st.markdown("---")
-        run_btn = st.button("🚀 Start Training", type="primary", use_container_width=True)
+        run_btn = st.button("🚀 Start Training", type="primary", width="stretch")
 
     with col2:
         st.markdown("### 📡 Live Training Status")
@@ -196,29 +196,49 @@ def render_train_tab():
                     cmd_parts.append("--no-sentiment")
 
                 log_placeholder.info(f"▶ Running: `{' '.join(cmd_parts)}`")
+                log_container = st.empty()
+                log_output = []
                 with st.spinner("Training in progress… This may take several minutes."):
                     env_vars = os.environ.copy()
                     env_vars["PYTHONIOENCODING"] = "utf-8"
-                    result = subprocess.run(
+                    
+                    process = subprocess.Popen(
                         cmd_parts,
-                        capture_output=True, text=True, encoding="utf-8",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
                         cwd=os.path.dirname(os.path.abspath(__file__)),
                         env=env_vars,
                     )
+                    
+                    # Read line by line and stream to UI and terminal
+                    for line in iter(process.stdout.readline, ''):
+                        if line:
+                            log_output.append(line)
+                            # Print to terminal as well
+                            sys.stdout.write(line)
+                            sys.stdout.flush()
+                            # Streamlit update (limit to last 30 lines for performance)
+                            log_container.code("".join(log_output[-30:]), language=None)
+                            
+                    process.wait()
 
-                if result.returncode == 0:
+                if process.returncode == 0:
                     st.success("✅ Training complete!")
-                    log_placeholder.code(result.stdout[-4000:], language=None)
+                    log_placeholder.code("".join(log_output[-100:]), language=None)
                 else:
-                    st.error("❌ Training failed!")
+                    st.error("❌ Training failed! Please check the logs below.")
                     err_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_errors.log")
                     if os.path.exists(err_path):
                         with open(err_path, "r") as f:
                             err_log = f.read()
                         with st.expander("Show Error Traceback (training_errors.log)", expanded=True):
                             st.code(err_log, language="python")
+                            if st.button("🔄 Retry Training"):
+                                st.rerun()
                     else:
-                        log_placeholder.code((result.stderr or result.stdout)[-4000:], language=None)
+                        log_placeholder.code("".join(log_output[-100:]), language=None)
 
 
 def render_eval_tab():
@@ -278,7 +298,7 @@ def render_eval_tab():
         img_path = os.path.join(OUTPUTS_DIR, f"{eval_ticker}_{img_key}.png")
         if os.path.exists(img_path):
             with chart_cols[shown % 2]:
-                st.image(img_path, caption=img_key.replace("_", " ").title(), use_container_width=True)
+                st.image(img_path, caption=img_key.replace("_", " ").title(), width="stretch")
             shown += 1
     if shown == 0:
         st.info("No chart images found. Run the full pipeline to generate them.")
@@ -384,9 +404,9 @@ def render_predict_tab():
                         break
 
                     x_input = torch.tensor(scaled[-WINDOW_SIZE:][np.newaxis])
-                    ps = boosted_predict(debm, x_input, ticker=boost_ticker, device='cpu')
+                    res_dict = boosted_predict(debm, x_input, ticker=boost_ticker, device='cpu')
 
-                    pred_val = inv_transform(ps)
+                    pred_val = inv_transform(res_dict['prediction'])
                     
                     # Fetch absolute live price
                     live_df = yf.Ticker(pred_ticker).history(period="1d")
@@ -394,25 +414,35 @@ def render_predict_tab():
                     
                     from config import PREDICT_LOG_RETURN
                     if PREDICT_LOG_RETURN:
+                        # 15% deviation check
+                        if abs(pred_val) > 0.15:
+                            pred_val *= 0.5  # dampen extreme predictions
                         pred_usd = last_usd * np.exp(pred_val)
                     else:
                         pred_usd = pred_val
 
                     pct_chg  = (pred_usd - last_usd) / last_usd * 100
-                    trend = 'BUY' if pred_usd > last_usd else 'SELL'
-                    trend_icon = '🚀' if trend == 'BUY' else '📉'
-                    trend_color = '#3fb950' if trend == 'BUY' else '#f85149'
+                    trend = 'BUY' if res_dict['direction'] > 0 else 'SELL' if res_dict['direction'] < 0 else 'HOLD'
+                    trend_icon = '🚀' if trend == 'BUY' else '📉' if trend == 'SELL' else '⏸️'
+                    trend_color = '#3fb950' if trend == 'BUY' else '#f85149' if trend == 'SELL' else '#d29922'
                     
-                    confidence = min(99.0, max(50.0, 50.0 + abs(pct_chg) * 8))
+                    confidence = res_dict['confidence']
                     conf_color = "#3fb950" if confidence >= 70 else "#d29922" if confidence >= 60 else "#f85149"
+                    
+                    agreement = res_dict['agreement']
 
                     with placeholder.container():
                         st.markdown(f"""
                         <div style="background: linear-gradient(135deg, #1c2130 0%, #0d1117 100%); padding: 25px; border-radius: 12px; max-width: 450px; border: 1px solid #30363d; border-left: 6px solid {trend_color}; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
                           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                              <div style="color: #8b949e; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">{badge} • {pred_ticker}</div>
-                              <div style="background: {conf_color}20; border: 1px solid {conf_color}; color: {conf_color}; padding: 3px 8px; border-radius: 20px; font-size: 12px; font-weight: bold;">
-                                  {confidence:.1f}% CONFIDENCE
+                              <div style="color: #8b949e; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Ensemble • {pred_ticker}</div>
+                              <div style="display: flex; gap: 8px;">
+                                  <div style="background: #1f6feb20; border: 1px solid #1f6feb; color: #58a6ff; padding: 3px 8px; border-radius: 20px; font-size: 12px; font-weight: bold;">
+                                      {agreement} AGREE
+                                  </div>
+                                  <div style="background: {conf_color}20; border: 1px solid {conf_color}; color: {conf_color}; padding: 3px 8px; border-radius: 20px; font-size: 12px; font-weight: bold;">
+                                      {confidence:.1f}% CONFIDENCE
+                                  </div>
                               </div>
                           </div>
                           <div style="color: #e6edf3; font-size: 38px; font-weight: 800; margin-bottom: 5px; letter-spacing: -0.5px;">${pred_usd:.2f}</div>
@@ -430,7 +460,7 @@ def render_predict_tab():
                 # Display the directional accuracy image directly on the prediction tab
                 dir_acc_img = os.path.join(OUTPUTS_DIR, f'{pred_ticker}_directional_acc.png')
                 if os.path.exists(dir_acc_img):
-                    st.image(dir_acc_img, use_container_width=True)
+                    st.image(dir_acc_img, width="stretch")
 
                 if not is_boosted:
                     st.info('Tip: Run the full training pipeline to enable Boosted Ensemble for higher accuracy.')
@@ -492,7 +522,7 @@ def render_landscape_tab():
     for img_key in ["energy_landscape", "predictions", "directional_acc"]:
         img_path = os.path.join(OUTPUTS_DIR, f"{land_ticker}_{img_key}.png")
         if os.path.exists(img_path):
-            st.image(img_path, caption=img_key.replace("_", " ").title(), use_container_width=True)
+            st.image(img_path, caption=img_key.replace("_", " ").title(), width="stretch")
 
     # Show conditions breakdown if available
     cond_path = os.path.join(MODELS_DIR, f"{land_ticker}_conditions.json")
@@ -570,7 +600,7 @@ def render_crash_tab():
     # Pre-saved crash PNG if available
     if os.path.exists(crash_png):
         st.markdown("### 📊 Full Crash Analysis Chart")
-        st.image(crash_png, use_container_width=True)
+        st.image(crash_png, width="stretch")
     else:
         # Render a quick inline chart
         st.markdown("### 📊 Actual vs Predicted")

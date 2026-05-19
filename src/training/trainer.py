@@ -171,6 +171,7 @@ def train_debm(X_train, y_train, X_val, y_val,
                n_features, ticker,
                sentiment_train=None, sentiment_val=None,
                stock_ids_train=None, stock_ids_val=None,
+               sample_weights=None,
                num_stocks: int = 0,
                epochs=DEBM_EPOCHS, device=DEVICE):
     """
@@ -267,12 +268,27 @@ def train_debm(X_train, y_train, X_val, y_val,
     # num_workers=0 on Windows (nt) to avoid DataLoader subprocess hang
     pin = (device == "cuda")
     nw  = 4 if (pin and os.name != 'nt') else 0
-    loader = DataLoader(
-        TensorDataset(*tensors),
-        batch_size=DEBM_BATCH, shuffle=True, drop_last=True,
-        pin_memory=pin, num_workers=nw,
-        persistent_workers=(nw > 0),
-    )
+    
+    if sample_weights is not None:
+        from torch.utils.data import WeightedRandomSampler
+        sampler_train = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(X_train),
+            replacement=True
+        )
+        loader = DataLoader(
+            TensorDataset(*tensors),
+            batch_size=DEBM_BATCH, sampler=sampler_train, drop_last=True,
+            pin_memory=pin, num_workers=nw,
+            persistent_workers=(nw > 0),
+        )
+    else:
+        loader = DataLoader(
+            TensorDataset(*tensors),
+            batch_size=DEBM_BATCH, shuffle=True, drop_last=True,
+            pin_memory=pin, num_workers=nw,
+            persistent_workers=(nw > 0),
+        )
 
     # Validation tensors
     Xv    = torch.tensor(X_val,        dtype=torch.float32, device=device)
@@ -297,140 +313,148 @@ def train_debm(X_train, y_train, X_val, y_val,
         f"multi_stock={'yes' if num_stocks > 0 else 'no'}"
     )
 
-    for ep in range(1, epochs + 1):
-        model.train()
-        tot = cd_s = pred_s = dir_s = 0.0
+    try:
+        for ep in range(1, epochs + 1):
+            model.train()
+            tot = cd_s = pred_s = dir_s = 0.0
 
-        for batch in loader:
-            if len(batch) == 4:
-                xb, yb, sb, sid_b = batch
-                sid_b = sid_b.to(device)
-            else:
-                xb, yb, sb = batch
-                sid_b = None
-            xb, yb, sb = xb.to(device), yb.to(device).unsqueeze(1), sb.to(device)
+            for batch in loader:
+                if len(batch) == 4:
+                    xb, yb, sb, sid_b = batch
+                    sid_b = sid_b.to(device)
+                else:
+                    xb, yb, sb = batch
+                    sid_b = None
+                xb, yb, sb = xb.to(device), yb.to(device).unsqueeze(1), sb.to(device)
 
-            # OBJECTIVE 1: AMP forward pass
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                # Forward (real data)
-                e_real, pred, _ = model(xb, sb, sid_b)
+                # OBJECTIVE 1: AMP forward pass
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    # Forward (real data)
+                    e_real, pred, _ = model(xb, sb, sid_b)
 
-                # Langevin negative samples
-                avg_s  = float(sb.mean().item())
-                h_fake = sampler.sample(
-                    base_model.energy_fn, batch_size=xb.size(0),
-                    sentiment_val=avg_s,
-                    stock_emb=base_model._se(sid_b, device) if num_stocks > 0 else None,
-                    n_steps=LANGEVIN_STEPS,
-                    step_size=LANGEVIN_STEP_SIZE,
-                    noise_std=LANGEVIN_NOISE,
-                )
-                sf     = torch.full((h_fake.size(0), 1), avg_s,
-                                    dtype=torch.float32, device=device)
-                e_fake = base_model.energy_fn(
-                    h_fake, sf,
-                    base_model._se(sid_b, device) if num_stocks > 0 else None
-                )
+                    # Langevin negative samples
+                    avg_s  = float(sb.mean().item())
+                    h_fake = sampler.sample(
+                        base_model.energy_fn, batch_size=xb.size(0),
+                        sentiment_val=avg_s,
+                        stock_emb=base_model._se(sid_b, device) if num_stocks > 0 else None,
+                        n_steps=LANGEVIN_STEPS,
+                        step_size=LANGEVIN_STEP_SIZE,
+                        noise_std=LANGEVIN_NOISE,
+                    )
+                    sf     = torch.full((h_fake.size(0), 1), avg_s,
+                                        dtype=torch.float32, device=device)
+                    e_fake = base_model.energy_fn(
+                        h_fake, sf,
+                        base_model._se(sid_b, device) if num_stocks > 0 else None
+                    )
 
-                pred_l = mse(pred, yb)
-                cd_l   = _cd_loss(e_real, e_fake)
+                    pred_l = mse(pred, yb)
+                    cd_l   = _cd_loss(e_real, e_fake)
 
-                # OBJECTIVE 5: Weighted BCE directional loss with label smoothing
-                prev_close = xb[:, -1, 3]   # index 3 = Close in FEATURE_COLS
-                dir_l  = _directional_loss(pred, yb, prev_close,
-                                           label_smoothing=LABEL_SMOOTHING)
+                    # OBJECTIVE 5: Weighted BCE directional loss with label smoothing
+                    prev_close = xb[:, -1, 3]   # index 3 = Close in FEATURE_COLS
+                    dir_l  = _directional_loss(pred, yb, prev_close,
+                                               label_smoothing=LABEL_SMOOTHING)
 
-                # Hybrid Loss Implementation
-                pred_diffs = pred.unsqueeze(1) - pred.unsqueeze(2)
-                true_diffs = yb.unsqueeze(1) - yb.unsqueeze(2)
-                rank_l = torch.relu(-pred_diffs * true_diffs).mean()
-                
-                hybrid_loss = 0.5 * dir_l + 0.3 * pred_l + 0.2 * rank_l
+                    # Hybrid Loss Implementation
+                    pred_diffs = pred.unsqueeze(1) - pred.unsqueeze(2)
+                    true_diffs = yb.unsqueeze(1) - yb.unsqueeze(2)
+                    rank_l = torch.relu(-pred_diffs * true_diffs).mean()
+                    
+                    hybrid_loss = 0.5 * dir_l + 0.3 * pred_l + 0.2 * rank_l
 
-                # Dynamic adaptive CD weight (v4 key fix)
-                w_cd   = _adaptive_cd_weight(pred_l.item(), cd_l.item())
-                loss   = hybrid_loss + w_cd * cd_l
+                    # Dynamic adaptive CD weight (v4 key fix)
+                    w_cd   = _adaptive_cd_weight(pred_l.item(), cd_l.item())
+                    loss   = hybrid_loss + w_cd * cd_l
 
-            opt.zero_grad()
-            scaler.scale(loss).backward()
-            # Unscale before clip_grad_norm_ so we clip actual gradients
-            scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-            
-            # Check for NaNs before step
-            has_nan = any(p.grad.isnan().any() or p.grad.isinf().any() for p in model.parameters() if p.grad is not None)
-            if not has_nan:
-                scaler.step(opt)
-                scaler.update()
-                ema.update(model)
-            else:
-                logger.warning(f"[DEBM] NaN/Inf gradient detected at epoch {ep}, skipping optimizer step to prevent crash.")
                 opt.zero_grad()
+                scaler.scale(loss).backward()
+                # Unscale before clip_grad_norm_ so we clip actual gradients
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                
+                # Check for NaNs before step
+                has_nan = any(p.grad.isnan().any() or p.grad.isinf().any() for p in model.parameters() if p.grad is not None)
+                if not has_nan:
+                    scaler.step(opt)
+                    ema.update(model)
+                else:
+                    logger.warning(f"[DEBM] NaN/Inf gradient detected at epoch {ep}, skipping optimizer step to prevent crash.")
+                    opt.zero_grad()
+                
+                # scaler.update() MUST be called unconditionally after unscale_() to prevent RuntimeError
+                scaler.update()
 
-            tot    += loss.item()
-            cd_s   += cd_l.item()
-            pred_s += pred_l.item()
-            dir_s  += dir_l.item()
+                tot    += loss.item()
+                cd_s   += cd_l.item()
+                pred_s += pred_l.item()
+                dir_s  += dir_l.item()
 
-        sched.step()
-        N = len(loader)
-        hist["train"].append(tot / N)
-        hist["cd"].append(cd_s / N)
-        hist["pred"].append(pred_s / N)
+            sched.step()
+            N = len(loader)
+            hist["train"].append(tot / N)
+            hist["cd"].append(cd_s / N)
+            hist["pred"].append(pred_s / N)
 
-        # Validation MSE with live model
-        model.eval()
-        vp_list = []
-        with torch.no_grad():
-            for i in range(0, len(Xv), DEBM_BATCH):
-                sid_batch = sid_v[i:i+DEBM_BATCH] if sid_v is not None else None
-                _, p, _ = model(Xv[i:i+DEBM_BATCH], sv[i:i+DEBM_BATCH], sid_batch)
-                vp_list.append(p)
-            vp = torch.cat(vp_list, dim=0)
-            vl = mse(vp, yv).item()
-        hist["val"].append(vl)
+            # Validation MSE with live model
+            model.eval()
+            vp_list = []
+            with torch.no_grad():
+                for i in range(0, len(Xv), DEBM_BATCH):
+                    sid_batch = sid_v[i:i+DEBM_BATCH] if sid_v is not None else None
+                    _, p, _ = model(Xv[i:i+DEBM_BATCH], sv[i:i+DEBM_BATCH], sid_batch)
+                    vp_list.append(p)
+                vp = torch.cat(vp_list, dim=0)
+                vl = mse(vp, yv).item()
+            hist["val"].append(vl)
 
-        # Validation MSE with EMA model (usually better)
-        ema.model.eval()
-        ema_vp_list = []
-        with torch.no_grad():
-            for i in range(0, len(Xv), DEBM_BATCH):
-                sid_batch = sid_v[i:i+DEBM_BATCH] if sid_v is not None else None
-                _, p, _ = ema.model(Xv[i:i+DEBM_BATCH], sv[i:i+DEBM_BATCH], sid_batch)
-                ema_vp_list.append(p)
-            ema_vp = torch.cat(ema_vp_list, dim=0)
-            ema_vl = mse(ema_vp, yv).item()
-        hist["ema_val"].append(ema_vl)
+            # Validation MSE with EMA model (usually better)
+            ema.model.eval()
+            ema_vp_list = []
+            with torch.no_grad():
+                for i in range(0, len(Xv), DEBM_BATCH):
+                    sid_batch = sid_v[i:i+DEBM_BATCH] if sid_v is not None else None
+                    _, p, _ = ema.model(Xv[i:i+DEBM_BATCH], sv[i:i+DEBM_BATCH], sid_batch)
+                    ema_vp_list.append(p)
+                ema_vp = torch.cat(ema_vp_list, dim=0)
+                ema_vl = mse(ema_vp, yv).item()
+            hist["ema_val"].append(ema_vl)
 
-        # OBJECTIVE 5: Directional accuracy for early stopping
-        val_da = _compute_val_dir_acc(ema.model, Xv, yv, sv, sid_v)
-        hist["val_dir_acc"].append(val_da)
+            # OBJECTIVE 5: Directional accuracy for early stopping
+            val_da = _compute_val_dir_acc(ema.model, Xv, yv, sv, sid_v)
+            hist["val_dir_acc"].append(val_da)
 
-        # Save on EMA val MSE improvement (checkpoint)
-        if ema_vl < best_val_mse:
-            best_val_mse = ema_vl
-            best_state = ema.model.module.state_dict() if hasattr(ema.model, 'module') else ema.model.state_dict()
-            torch.save(best_state, ckpt)
+            # Save on EMA val MSE improvement (checkpoint)
+            if ema_vl < best_val_mse:
+                best_val_mse = ema_vl
+                best_state = ema.model.module.state_dict() if hasattr(ema.model, 'module') else ema.model.state_dict()
+                torch.save(best_state, ckpt)
 
-        # Early stopping removed; keeping best model based on val_da
-        if val_da > best_val_da:
-            best_val_da = val_da
-            best_state = ema.model.module.state_dict() if hasattr(ema.model, 'module') else ema.model.state_dict()
-            torch.save(best_state, ckpt)
+            # Early stopping removed; keeping best model based on val_da
+            if val_da > best_val_da:
+                best_val_da = val_da
+                best_state = ema.model.module.state_dict() if hasattr(ema.model, 'module') else ema.model.state_dict()
+                torch.save(best_state, ckpt)
 
-        if ep % 10 == 0 or ep == 1:
-            logger.info(
-                f"  Ep {ep:3d}/{epochs}  "
-                f"train={hist['train'][-1]:.5f}  "
-                f"val={vl:.5f}  ema_val={ema_vl:.5f}  "
-                f"val_da={val_da:.1f}%  "
-                f"cd={hist['cd'][-1]:.5f}  "
-                f"dir={dir_s/N:.5f}"
-            )
+            if ep % 10 == 0 or ep == 1:
+                logger.info(
+                    f"  Ep {ep:3d}/{epochs}  "
+                    f"train={hist['train'][-1]:.5f}  "
+                    f"val={vl:.5f}  ema_val={ema_vl:.5f}  "
+                    f"val_da={val_da:.1f}%  "
+                    f"cd={hist['cd'][-1]:.5f}  "
+                    f"dir={dir_s/N:.5f}"
+                )
 
-        # OBJECTIVE 1: GPU memory monitor
-        _log_gpu_memory(ep)
-
+            # OBJECTIVE 1: GPU memory monitor
+            _log_gpu_memory(ep)
+    except Exception as e:
+        import traceback
+        with open("training_errors.log", "w") as f:
+            f.write(traceback.format_exc())
+        logger.error(f"[DEBM] Training crashed: {e}")
+        raise e
 
     # Load best EMA weights
     if hasattr(model, 'module'):
