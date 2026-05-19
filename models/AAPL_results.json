@@ -1,0 +1,49 @@
+{
+  "DEBM": {
+    "RMSE": 0.0185,
+    "MAE": 0.012,
+    "DirectionalAcc": 51.76,
+    "MAPE": 1.8471
+  },
+  "LSTM": {
+    "RMSE": 0.0185,
+    "MAE": 0.012,
+    "DirectionalAcc": 53.39,
+    "MAPE": 1.8512
+  },
+  "GAN": {
+    "RMSE": 0.0185,
+    "MAE": 0.012,
+    "DirectionalAcc": 53.39,
+    "MAPE": 1.854
+  },
+  "Ensemble": {
+    "RMSE": 0.0185,
+    "MAE": 0.012,
+    "DirectionalAcc": 52.03,
+    "MAPE": 1.8483
+  },
+  "crash_analysis": {
+    "n_crash_days": 32,
+    "n_total_days": 369,
+    "crash_dir_acc": 28.125,
+    "crash_rmse": 0.039563484489917755,
+    "normal_dir_acc": 54.00593471810089,
+    "confusion_matrix": [
+      [
+        9,
+        23
+      ],
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  "BoostedEnsemble": {
+    "DirectionalAcc": 52.44,
+    "RMSE": 0.0185,
+    "MAE": 0.012,
+    "MAPE": 1.8471
+  }
+}
