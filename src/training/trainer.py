@@ -340,18 +340,32 @@ def train_debm(X_train, y_train, X_val, y_val,
                 dir_l  = _directional_loss(pred, yb, prev_close,
                                            label_smoothing=LABEL_SMOOTHING)
 
+                # Hybrid Loss Implementation
+                pred_diffs = pred.unsqueeze(1) - pred.unsqueeze(2)
+                true_diffs = yb.unsqueeze(1) - yb.unsqueeze(2)
+                rank_l = torch.relu(-pred_diffs * true_diffs).mean()
+                
+                hybrid_loss = 0.5 * dir_l + 0.3 * pred_l + 0.2 * rank_l
+
                 # Dynamic adaptive CD weight (v4 key fix)
                 w_cd   = _adaptive_cd_weight(pred_l.item(), cd_l.item())
-                loss   = PRED_WEIGHT * pred_l + w_cd * cd_l + DIR_LOSS_WEIGHT * dir_l
+                loss   = hybrid_loss + w_cd * cd_l
 
             opt.zero_grad()
             scaler.scale(loss).backward()
             # Unscale before clip_grad_norm_ so we clip actual gradients
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-            scaler.step(opt)
-            scaler.update()
-            ema.update(model)
+            
+            # Check for NaNs before step
+            has_nan = any(p.grad.isnan().any() or p.grad.isinf().any() for p in model.parameters() if p.grad is not None)
+            if not has_nan:
+                scaler.step(opt)
+                scaler.update()
+                ema.update(model)
+            else:
+                logger.warning(f"[DEBM] NaN/Inf gradient detected at epoch {ep}, skipping optimizer step to prevent crash.")
+                opt.zero_grad()
 
             tot    += loss.item()
             cd_s   += cd_l.item()
@@ -398,12 +412,11 @@ def train_debm(X_train, y_train, X_val, y_val,
             best_state = ema.model.module.state_dict() if hasattr(ema.model, 'module') else ema.model.state_dict()
             torch.save(best_state, ckpt)
 
-        # OBJECTIVE 5: Early stopping on directional accuracy
+        # Early stopping removed; keeping best model based on val_da
         if val_da > best_val_da:
             best_val_da = val_da
-            es_counter  = 0
-        else:
-            es_counter += 1
+            best_state = ema.model.module.state_dict() if hasattr(ema.model, 'module') else ema.model.state_dict()
+            torch.save(best_state, ckpt)
 
         if ep % 10 == 0 or ep == 1:
             logger.info(
@@ -418,13 +431,6 @@ def train_debm(X_train, y_train, X_val, y_val,
         # OBJECTIVE 1: GPU memory monitor
         _log_gpu_memory(ep)
 
-        if es_counter >= es_patience:
-            logger.info(
-                f"[DEBM] Early stopping at epoch {ep} "
-                f"(no val_dir_acc improvement for {es_patience} epochs). "
-                f"Best val_dir_acc={best_val_da:.1f}%"
-            )
-            break
 
     # Load best EMA weights
     if hasattr(model, 'module'):

@@ -68,7 +68,7 @@ class EnergyFunction(nn.Module):
         layers, prev = [], input_dim
         for h in hidden_dims:
             layers += [nn.utils.spectral_norm(nn.Linear(prev, h)),
-                       nn.LayerNorm(h), nn.LeakyReLU(0.2)]
+                       nn.LayerNorm(h), nn.GELU()]
             prev = h
         layers.append(nn.Linear(prev, 1))
         self.net = nn.Sequential(*layers)
@@ -173,7 +173,8 @@ class LangevinSampler:
         for step in range(n_steps):
             frac    = step / max(n_steps - 1, 1)
             current = step_size * (0.5 + 0.5 * np.cos(np.pi * frac))
-            h = self._step(energy_fn, h, sent, stock_emb, current, noise_std)
+            current_noise = max(noise_std * 0.01, noise_std * (0.99 ** step))
+            h = self._step(energy_fn, h, sent, stock_emb, current, current_noise)
         self.buffer[idx] = h.detach()
         return h.detach()
 

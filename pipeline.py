@@ -195,8 +195,9 @@ def run_pipeline_v2(
     close_idx = data["close_idx"]
     target_idx = data["target_col_idx"]
 
-    s_train = X_train[:, -1, data["n_features"] - 4]  # sentinel: use feature index for 'sentiment'
-    s_val   = X_val[:,   -1, data["n_features"] - 4]
+    sent_idx = FEATURE_COLS.index("sentiment")
+    s_train = X_train[:, -1, sent_idx]
+    s_val   = X_val[:,   -1, sent_idx]
 
     print("\n[v2] Step 2 — Train DEBM (initial, real data)")
     debm_model, debm_hist = train_debm(
@@ -299,7 +300,7 @@ def run_pipeline_v2(
     except Exception as e:
         print(f"[v2] Walk-forward evaluation failed ({e}) — skipping")
 
-    meta = {"n_features": int(n_feat), "close_idx": int(close_idx)}
+    meta = {"n_features": int(n_feat), "close_idx": int(close_idx), "target_col_idx": int(target_idx), "feature_columns": list(FEATURE_COLS)}
     with open(os.path.join(MODELS_DIR, f"{ticker}_meta.json"), "w") as f:
         json.dump(meta, f)
     with open(os.path.join(MODELS_DIR, f"{ticker}_results.json"), "w") as f:
@@ -520,7 +521,7 @@ def run_pipeline(
     with open(os.path.join(MODELS_DIR, f"{ticker}_results.json"), "w") as f:
         json.dump(combined, f, indent=2)
     with open(os.path.join(MODELS_DIR, f"{ticker}_meta.json"), "w") as f:
-        json.dump({"n_features": int(n_feat), "close_idx": int(close_idx)}, f)
+        json.dump({"n_features": int(n_feat), "close_idx": int(close_idx), "target_col_idx": int(target_idx), "feature_columns": list(FEATURE_COLS)}, f)
 
     print(f"\n{'='*66}")
     print(f"  FULL PIPELINE COMPLETE  |  {ticker}")
@@ -596,25 +597,32 @@ def run_pipeline_multi(
     print(f"  Combined: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}")
 
     print(f"\n[Multi] Step 3 — Training shared DEBM (num_stocks={num_stocks}) …")
-    model, hist = train_debm(
-        X_train, y_train, X_val, y_val,
-        n_features=n_features, ticker="multi",
-        sentiment_train=X_train[:, -1, -1],
-        sentiment_val=X_val[:,   -1, -1],
-        stock_ids_train=sid_train, stock_ids_val=sid_val,
-        num_stocks=num_stocks, epochs=debm_epochs, device=device,
-    )
+    try:
+        model, hist = train_debm(
+            X_train, y_train, X_val, y_val,
+            n_features=n_features, ticker="multi",
+            sentiment_train=X_train[:, -1, FEATURE_COLS.index("sentiment")],
+            sentiment_val=X_val[:,   -1, FEATURE_COLS.index("sentiment")],
+            stock_ids_train=sid_train, stock_ids_val=sid_val,
+            num_stocks=num_stocks, epochs=debm_epochs, device=device,
+        )
 
-    print("\n[Multi] Step 4 — Dreaming Phase …")
-    model = dreaming_phase(
-        model, X_train, y_train, X_val, y_val,
-        n_features=n_features, ticker="multi",
-        sentiment_train=X_train[:, -1, -1],
-        sentiment_val=X_val[:,   -1, -1],
-        stock_ids_train=sid_train, stock_ids_val=sid_val,
-        condition_labels=multi_seq_labels_train,
-        num_stocks=num_stocks, device=device,
-    )
+        print("\n[Multi] Step 4 — Dreaming Phase …")
+        model = dreaming_phase(
+            model, X_train, y_train, X_val, y_val,
+            n_features=n_features, ticker="multi",
+            sentiment_train=X_train[:, -1, FEATURE_COLS.index("sentiment")],
+            sentiment_val=X_val[:,   -1, FEATURE_COLS.index("sentiment")],
+            stock_ids_train=sid_train, stock_ids_val=sid_val,
+            condition_labels=multi_seq_labels_train,
+            num_stocks=num_stocks, device=device,
+        )
+    except Exception as e:
+        import traceback
+        with open("training_errors.log", "w") as f:
+            f.write(traceback.format_exc())
+        print(f"\n[CRITICAL ERROR] Training crashed: {e}")
+        raise e
 
     print("\n[Multi] Step 5 — LSTM baselines per ticker …")
     for ticker in tickers:

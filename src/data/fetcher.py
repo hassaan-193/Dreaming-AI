@@ -153,6 +153,17 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df["stoch_k"]    = (close - ln14) / (hn14 - ln14 + 1e-9) * 100
         df["stoch_d"]    = df["stoch_k"].rolling(3).mean()
 
+    # ── NEW FEATURES (Momentum & Volatility) ──────────────────────────────────
+    df["mom_5d"] = close.pct_change(5)
+    df["mom_10d"] = close.pct_change(10)
+    df["mom_21d"] = close.pct_change(21)
+    df["volatility_10d"] = close.pct_change().rolling(10).std() * np.sqrt(252)
+    df["volatility_21d"] = close.pct_change().rolling(21).std() * np.sqrt(252)
+    
+    # VIX Proxy: rolling 20d std of log returns * sqrt(252)
+    log_ret = np.log(close / close.shift(1))
+    df["vix_proxy"] = log_ret.rolling(20).std() * np.sqrt(252)
+
     # ── IMPROVEMENT 9: Volume Profile Features ────────────────────────────────
     # These are INDEPENDENT of price and carry different signal.
 
@@ -164,7 +175,9 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # Volume momentum — is buying pressure increasing vs 20-day average?
     vol_sma20 = volume.rolling(20).mean()
+    vol_sma5 = volume.rolling(5).mean()
     df["vol_momentum"] = volume / (vol_sma20 + 1e-9)
+    df["vol_mom_5_20"] = vol_sma5 / (vol_sma20 + 1e-9)
 
     # Price-Volume Divergence — price up but volume down = weak/suspicious move
     price_chg = close.pct_change()

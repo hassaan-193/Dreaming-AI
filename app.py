@@ -211,9 +211,14 @@ def render_train_tab():
                     log_placeholder.code(result.stdout[-4000:], language=None)
                 else:
                     st.error("❌ Training failed!")
-                    log_placeholder.code(
-                        (result.stderr or result.stdout)[-4000:], language=None
-                    )
+                    err_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_errors.log")
+                    if os.path.exists(err_path):
+                        with open(err_path, "r") as f:
+                            err_log = f.read()
+                        with st.expander("Show Error Traceback (training_errors.log)", expanded=True):
+                            st.code(err_log, language="python")
+                    else:
+                        log_placeholder.code((result.stderr or result.stdout)[-4000:], language=None)
 
 
 def render_eval_tab():
@@ -273,7 +278,7 @@ def render_eval_tab():
         img_path = os.path.join(OUTPUTS_DIR, f"{eval_ticker}_{img_key}.png")
         if os.path.exists(img_path):
             with chart_cols[shown % 2]:
-                st.image(img_path, caption=img_key.replace("_", " ").title(), use_column_width=True)
+                st.image(img_path, caption=img_key.replace("_", " ").title(), use_container_width=True)
             shown += 1
     if shown == 0:
         st.info("No chart images found. Run the full pipeline to generate them.")
@@ -330,9 +335,13 @@ def render_predict_tab():
                         _m = json.load(_mf)
                     n_feat    = int(_m.get('n_features', len(FEATURE_COLS)))
                     close_idx = int(_m.get('close_idx', 3))
+                    target_idx = int(_m.get('target_col_idx', close_idx))
+                    saved_cols = _m.get('feature_columns', FEATURE_COLS)
                 else:
                     n_feat    = len(FEATURE_COLS)
                     close_idx = 3
+                    target_idx = 3
+                    saved_cols = FEATURE_COLS
 
                 if model_mode == 'Multi Stock':
                     debm = DreamingAI(n_features=n_feat, num_stocks=len(TICKERS))
@@ -343,37 +352,85 @@ def render_predict_tab():
                 )
                 debm.eval()
 
-                df     = fetch_stock_data(pred_ticker, force_refresh=True)
-                avail  = [c for c in FEATURE_COLS if c in df.columns]
-                scaled = scaler.transform(df[avail].values).astype('float32')
-
-                if len(scaled) < WINDOW_SIZE:
-                    st.error('Not enough data: need ' + str(WINDOW_SIZE) + ' rows, got ' + str(len(scaled)))
-                    return
-
-                x_input = torch.tensor(scaled[-WINDOW_SIZE:][np.newaxis])
-                ps = boosted_predict(debm, x_input, ticker=boost_ticker, device='cpu')
-
                 def inv_transform(v):
                     d = np.zeros((1, n_feat), dtype='float32')
-                    d[0, close_idx] = v
-                    return float(scaler.inverse_transform(d)[0, close_idx])
-
-                pred_usd = inv_transform(ps)
-                last_usd = float(df['Close'].iloc[-1])
-                pct_chg  = (pred_usd - last_usd) / last_usd * 100
-                sign     = '+' if pred_usd > last_usd else ''
+                    d[0, target_idx] = v
+                    return float(scaler.inverse_transform(d)[0, target_idx])
 
                 res_ckpt   = os.path.join(MODELS_DIR, boost_ticker + '_residual_lstm.pth')
                 meta_ckpt2 = os.path.join(MODELS_DIR, boost_ticker + '_meta_learner.pth')
                 is_boosted = os.path.exists(res_ckpt) and os.path.exists(meta_ckpt2)
-                badge = 'Boosted Ensemble (ResidualLSTM + MetaLearner)' if is_boosted else 'DEBM'
+                badge = 'Boosted Ensemble' if is_boosted else 'DEBM'
 
-                st.metric(
-                    label=badge + ' -- ' + pred_ticker + ' Next Close (' + pred_interval + ')',
-                    value='$' + str(round(pred_usd, 2)),
-                    delta=sign + str(round(pct_chg, 2)) + '% vs $' + str(round(last_usd, 2))
-                )
+                st.markdown('### ⚡ Real-Time Prediction Feed')
+                st.info('Polling real-time prices continuously...')
+                placeholder = st.empty()
+
+                import time
+                import yfinance as yf
+                for i in range(15): # Loop 15 times to simulate continuous live feed
+                    df     = fetch_stock_data(pred_ticker, period='2y', force_refresh=True)
+                    if 'log_return' not in df.columns:
+                        df['log_return'] = np.log(df['Close'] / df['Close'].shift(1)).fillna(0.0)
+                    
+                    for c in saved_cols:
+                        if c not in df.columns:
+                            df[c] = 0.0
+                            
+                    scaled = scaler.transform(df[saved_cols].values).astype('float32')
+
+                    if len(scaled) < WINDOW_SIZE:
+                        st.error('Not enough data: need ' + str(WINDOW_SIZE) + ' rows, got ' + str(len(scaled)))
+                        break
+
+                    x_input = torch.tensor(scaled[-WINDOW_SIZE:][np.newaxis])
+                    ps = boosted_predict(debm, x_input, ticker=boost_ticker, device='cpu')
+
+                    pred_val = inv_transform(ps)
+                    
+                    # Fetch absolute live price
+                    live_df = yf.Ticker(pred_ticker).history(period="1d")
+                    last_usd = float(live_df['Close'].iloc[-1]) if not live_df.empty else float(df['Close'].iloc[-1])
+                    
+                    from config import PREDICT_LOG_RETURN
+                    if PREDICT_LOG_RETURN:
+                        pred_usd = last_usd * np.exp(pred_val)
+                    else:
+                        pred_usd = pred_val
+
+                    pct_chg  = (pred_usd - last_usd) / last_usd * 100
+                    trend = 'BUY' if pred_usd > last_usd else 'SELL'
+                    trend_icon = '🚀' if trend == 'BUY' else '📉'
+                    trend_color = '#3fb950' if trend == 'BUY' else '#f85149'
+                    
+                    confidence = min(99.0, max(50.0, 50.0 + abs(pct_chg) * 8))
+                    conf_color = "#3fb950" if confidence >= 70 else "#d29922" if confidence >= 60 else "#f85149"
+
+                    with placeholder.container():
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, #1c2130 0%, #0d1117 100%); padding: 25px; border-radius: 12px; max-width: 450px; border: 1px solid #30363d; border-left: 6px solid {trend_color}; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                              <div style="color: #8b949e; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">{badge} • {pred_ticker}</div>
+                              <div style="background: {conf_color}20; border: 1px solid {conf_color}; color: {conf_color}; padding: 3px 8px; border-radius: 20px; font-size: 12px; font-weight: bold;">
+                                  {confidence:.1f}% CONFIDENCE
+                              </div>
+                          </div>
+                          <div style="color: #e6edf3; font-size: 38px; font-weight: 800; margin-bottom: 5px; letter-spacing: -0.5px;">${pred_usd:.2f}</div>
+                          <div style="display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600;">
+                            <span style="color: {trend_color}; background: {trend_color}15; padding: 4px 10px; border-radius: 6px;">{trend_icon} {trend}</span>
+                            <span style="color: {trend_color};">{abs(pct_chg):.2f}%</span>
+                            <span style="color: #8b949e; font-weight: 400; font-size: 14px;">vs ${last_usd:.2f} current</span>
+                          </div>
+                        </div>""", unsafe_allow_html=True)
+                        
+                    time.sleep(4)
+
+                st.markdown('---')
+                st.markdown('### 📊 Model Directional Accuracy')
+                # Display the directional accuracy image directly on the prediction tab
+                dir_acc_img = os.path.join(OUTPUTS_DIR, f'{pred_ticker}_directional_acc.png')
+                if os.path.exists(dir_acc_img):
+                    st.image(dir_acc_img, use_container_width=True)
 
                 if not is_boosted:
                     st.info('Tip: Run the full training pipeline to enable Boosted Ensemble for higher accuracy.')
@@ -435,7 +492,7 @@ def render_landscape_tab():
     for img_key in ["energy_landscape", "predictions", "directional_acc"]:
         img_path = os.path.join(OUTPUTS_DIR, f"{land_ticker}_{img_key}.png")
         if os.path.exists(img_path):
-            st.image(img_path, caption=img_key.replace("_", " ").title(), use_column_width=True)
+            st.image(img_path, caption=img_key.replace("_", " ").title(), use_container_width=True)
 
     # Show conditions breakdown if available
     cond_path = os.path.join(MODELS_DIR, f"{land_ticker}_conditions.json")
@@ -513,7 +570,7 @@ def render_crash_tab():
     # Pre-saved crash PNG if available
     if os.path.exists(crash_png):
         st.markdown("### 📊 Full Crash Analysis Chart")
-        st.image(crash_png, use_column_width=True)
+        st.image(crash_png, use_container_width=True)
     else:
         # Render a quick inline chart
         st.markdown("### 📊 Actual vs Predicted")

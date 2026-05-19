@@ -282,6 +282,7 @@ def build_sentiment_series(df, ticker, use_finbert: bool = False):
 def attach_sentiment(df, ticker, use_finbert: bool = False):
     df = df.copy()
     df["sentiment"] = build_sentiment_series(df, ticker, use_finbert).values
+    df["sentiment_ma_3"] = df["sentiment"].rolling(3).mean().bfill()
     print(f"[Sentiment] Attached — range [{df['sentiment'].min():.3f}, {df['sentiment'].max():.3f}]")
     return df
 

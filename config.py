@@ -86,9 +86,10 @@ TECH_COLS = [
     "ema_20", "ema_50",
     "bb_upper", "bb_lower", "bb_pct",
     "atr", "obv_norm", "cci", "williams_r", "stoch_k", "stoch_d",
+    "mom_5d", "mom_10d", "mom_21d", "volatility_10d", "volatility_21d"
 ]
 
-VOLUME_COLS = ["vwap", "vol_momentum", "pv_divergence", "vrsi"]
+VOLUME_COLS = ["vwap", "vol_momentum", "pv_divergence", "vrsi", "vol_mom_5_20"]
 
 MACRO_COLS = ["vix", "spy_return"]
 
@@ -96,9 +97,9 @@ FEATURE_COLS = (
     OHLCV_COLS
     + TECH_COLS
     + VOLUME_COLS
-    + ["sentiment", "log_return"]
+    + ["sentiment", "sentiment_ma_3", "log_return"]
     + MACRO_COLS
-    + ["earnings_tomorrow"]
+    + ["vix_proxy", "earnings_tomorrow"]
 )
 
 N_FEATURES = len(FEATURE_COLS)   # auto-computed — currently 29
@@ -131,7 +132,7 @@ COSINE_T_MAX   = DEBM_EPOCHS   # period of cosine cycle
 COSINE_ETA_MIN = 1e-6          # minimum LR
 
 # Langevin sampling
-LANGEVIN_STEPS      = 100
+LANGEVIN_STEPS      = 60
 LANGEVIN_STEP_SIZE  = 0.003
 LANGEVIN_NOISE      = 0.001
 LANGEVIN_N_CHAINS   = 10
